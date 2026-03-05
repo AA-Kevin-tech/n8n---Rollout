@@ -1,0 +1,207 @@
+{
+  "name": "Rollout Policy Ask (RAG Q&A)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ask-rollout-policy",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "rollout-policy-ask"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst userMessage = body.message ?? body.user_message ?? body.text ?? '';\nif (!userMessage || !String(userMessage).trim()) {\n  return [{ json: { error: 'Missing message, user_message, or text in request body.', _skipRag: true } }];\n}\nreturn [{\n  json: {\n    user_message: String(userMessage).trim(),\n    domain: 'company_policy_rollout'\n  }\n}];"
+      },
+      "id": "build-payload",
+      "name": "Build payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "skip-rag",
+              "leftValue": "={{ $json._skipRag }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-skip",
+      "name": "If missing message",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [580, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{ json: { success: false, error: item.error || 'Bad request', answer: null, sources: [] } }];"
+      },
+      "id": "format-error",
+      "name": "Format error response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 200]
+    },
+    {
+      "parameters": {
+        "mode": "getMany",
+        "prompt": "={{ $json.user_message }}",
+        "limit": 10,
+        "qdrantCollection": "rollout_policy",
+        "options": {
+          "includeMetadata": true
+        }
+      },
+      "id": "vector-store-get-many",
+      "name": "Retrieve from Vector Store",
+      "type": "n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "model": "text-embedding-3-small",
+        "options": {}
+      },
+      "id": "embeddings-openai",
+      "name": "OpenAI Embeddings",
+      "type": "n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1,
+      "position": [500, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nif (item._skipRag) {\n  return [{ json: { success: false, error: item.error, answer: null, sources: [] } }];\n}\nconst docs = item.documents || item.results || item.matches || [];\nconst context = Array.isArray(docs)\n  ? docs.map((d, i) => {\n      const content = typeof d === 'string' ? d : (d.pageContent || d.content || d.text || '');\n      const meta = typeof d === 'object' && d.metadata ? d.metadata : {};\n      const source = meta.source_file_name || meta.source || `Chunk ${i + 1}`;\n      return `[Source: ${source}]\\n${content}`;\n    }).join('\\n\\n---\\n\\n')\n  : '';\nconst userMessage = item.user_message || $('Build payload').first().json.user_message;\nreturn [{\n  json: {\n    context: context || '(No relevant policy documents found.)',\n    user_message: userMessage,\n    has_context: context.length > 0\n  }\n}];"
+      },
+      "id": "format-context",
+      "name": "Format context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a company policy assistant. Answer ONLY using the following context from official policy documents. Cite the source file name when relevant. If the context does not contain enough information to answer, say so clearly and do not invent policy. Keep answers concise and factual.\n\nContext:\n{{ $json.context }}\n\nUser question: {{ $json.user_message }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 1024
+        }
+      },
+      "id": "openai-chat",
+      "name": "OpenAI Chat",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst choice = item.message?.content ?? item.choices?.[0]?.message?.content ?? item.content ?? item.answer ?? '';\nconst prev = $('Format context').first().json;\nconst sources = [];\nif (prev.context && prev.context !== '(No relevant policy documents found.)') {\n  const matches = prev.context.matchAll(/\\[Source: ([^\\]]+)\\]/g);\n  for (const m of matches) {\n    if (m[1] && !sources.includes(m[1])) sources.push(m[1]);\n  }\n}\nreturn [{\n  json: {\n    success: true,\n    answer: typeof choice === 'string' ? choice : JSON.stringify(choice),\n    sources: sources.length ? sources : (prev.has_context ? ['Policy documents'] : [])\n  }\n}];"
+      },
+      "id": "format-response",
+      "name": "Format response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: $json.success, answer: $json.answer, sources: $json.sources, error: $json.error || null }) }}",
+        "options": {
+          "responseCode": "={{ $json.success ? 200 : ($json.error && $json.error.includes('Missing') ? 400 : 502) }}"
+        }
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [{ "node": "Build payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build payload": {
+      "main": [
+        [{ "node": "If missing message", "type": "main", "index": 0 }]
+      ]
+    },
+    "If missing message": {
+      "main": [
+        [{ "node": "Format error response", "type": "main", "index": 0 }],
+        [{ "node": "Retrieve from Vector Store", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format error response": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "Retrieve from Vector Store": {
+      "main": [
+        [{ "node": "Format context", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Embeddings": {
+      "main": [
+        [{ "node": "Retrieve from Vector Store", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format context": {
+      "main": [
+        [{ "node": "OpenAI Chat", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Chat": {
+      "main": [
+        [{ "node": "Format response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format response": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "name": "Rollout Ingest (Policy → Vector Store)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "execute-workflow-trigger",
+      "name": "When called by Watch workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {
+          "googleFileConversion": {
+            "conversion": {
+              "docsToFormat": "text/plain"
+            }
+          }
+        }
+      },
+      "id": "google-drive-download",
+      "name": "Download file",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "fromFile",
+        "binaryPropertyName": "data",
+        "options": {
+          "maxPages": 0
+        }
+      },
+      "id": "extract-from-file",
+      "name": "Extract text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst text = item.data || item.text || String(item.content || '');\nconst sourceFileId = item.id || '';\nconst sourceFileName = item.name || 'unknown';\nif (!text || !text.trim()) {\n  return [{ json: { text: '(empty)', source_file_id: sourceFileId, source_file_name: sourceFileName } }];\n}\nreturn [{ json: { text, source_file_id: sourceFileId, source_file_name: sourceFileName } }];"
+      },
+      "id": "code-format",
+      "name": "Format for loader",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "mode": "defineBelow",
+        "data": "={{ $json.text }}",
+        "metadata": "={{ { source_file_id: $json.source_file_id, source_file_name: $json.source_file_name } }}",
+        "textSplitter": "simple"
+      },
+      "id": "default-data-loader",
+      "name": "Chunk and load",
+      "type": "n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "qdrantCollection": "rollout_policy",
+        "options": {}
+      },
+      "id": "vector-store-qdrant",
+      "name": "Insert into Vector Store",
+      "type": "n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "model": "text-embedding-3-small",
+        "options": {}
+      },
+      "id": "embeddings-openai",
+      "name": "OpenAI Embeddings",
+      "type": "n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1,
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "When called by Watch workflow": {
+      "main": [
+        [{ "node": "Download file", "type": "main", "index": 0 }]
+      ]
+    },
+    "Download file": {
+      "main": [
+        [{ "node": "Extract text", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract text": {
+      "main": [
+        [{ "node": "Format for loader", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format for loader": {
+      "main": [
+        [{ "node": "Chunk and load", "type": "main", "index": 0 }]
+      ]
+    },
+    "Chunk and load": {
+      "main": [
+        [{ "node": "Insert into Vector Store", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Embeddings": {
+      "main": [
+        [{ "node": "Insert into Vector Store", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
